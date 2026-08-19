@@ -4,8 +4,7 @@ const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const ENV_FILE = path.join(process.cwd(), ".env");
-loadEnv(ENV_FILE);
+loadEnv(path.join(process.cwd(), ".env"));
 
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3001);
@@ -13,6 +12,7 @@ const TOKEN = process.env.CICD_TOKEN || "";
 const REPO = process.env.GITHUB_REPO || "nguynninh/vlive-docs";
 const DEPLOY_SCRIPT = process.env.DEPLOY_SCRIPT || path.join(process.cwd(), "scripts/deploy.sh");
 const LOG_FILE = process.env.LOG_FILE || path.join(process.cwd(), "deploy.log");
+const DOCS_BASE_URL = (process.env.DOCS_BASE_URL || "https://docs-mobile.vtvlive.vn").replace(/\/+$/, "");
 
 let running = false;
 
@@ -90,102 +90,31 @@ function normalizeTag(value) {
   return tag;
 }
 
-function config() {
-  return {
-    appDir: process.env.APP_DIR || "/home/vtvlive/vlive-docs",
-    pm2App: process.env.PM2_APP || "vlive-docs",
-  };
-}
-
-function run(command, args, options = {}) {
+function run(command, args) {
   try {
     return execFileSync(command, args, {
       encoding: "utf8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "pipe"],
-      ...options,
     }).trim();
   } catch (error) {
     return "";
   }
 }
 
-function gitInfo(appDir) {
-  const exists = fs.existsSync(appDir);
-  const isRepo = fs.existsSync(path.join(appDir, ".git"));
-  if (!exists || !isRepo) {
-    return {
-      exists,
-      isRepo,
-      path: appDir,
-      branch: "-",
-      tag: "-",
-      commit: "-",
-      status: exists ? "not a git repo" : "path missing",
-    };
-  }
-
-  return {
-    exists,
-    isRepo,
-    path: appDir,
-    branch: run("git", ["-C", appDir, "branch", "--show-current"]) || "(detached)",
-    tag: run("git", ["-C", appDir, "describe", "--tags", "--exact-match", "HEAD"]) || "",
-    commit: run("git", ["-C", appDir, "rev-parse", "--short", "HEAD"]) || "",
-    status: run("git", ["-C", appDir, "status", "--short"]) || "clean",
-  };
+function versionAppName(tag) {
+  return `vlive-docs-${tag}`;
 }
 
-function pm2Apps() {
+function runningVersionTags() {
+  const prefix = "vlive-docs-";
   try {
-    return JSON.parse(run("pm2", ["jlist"]) || "[]").map((app) => {
-      const env = app.pm2_env || {};
-      return {
-        id: env.pm_id,
-        name: app.name,
-        status: env.status,
-        cwd: env.pm_cwd || "",
-        port: env.PORT || "",
-        restarts: env.restart_time,
-      };
-    });
+    return new Set(JSON.parse(run("pm2", ["jlist"]) || "[]")
+      .filter((app) => app.pm2_env?.status === "online" && app.name?.startsWith(prefix))
+      .map((app) => app.name.slice(prefix.length)));
   } catch (error) {
-    return [];
+    return new Set();
   }
-}
-
-function statusInfo() {
-  const cfg = config();
-  const apps = pm2Apps();
-  return {
-    cfg,
-    cicd: {
-      path: process.cwd(),
-      deployScript: DEPLOY_SCRIPT,
-      logFile: LOG_FILE,
-      url: `http://${HOST}:${PORT}`,
-      status: "running",
-    },
-    target: gitInfo(cfg.appDir),
-    apps,
-    selectedApp: apps.find((app) => app.name === cfg.pm2App),
-  };
-}
-
-function saveConfig(next) {
-  const current = fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, "utf8") : "";
-  const values = Object.fromEntries(current.split(/\r?\n/).map((line) => {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    return match ? [match[1], match[2]] : [];
-  }).filter((item) => item.length));
-
-  values.APP_DIR = next.appDir;
-  values.PM2_APP = next.pm2App;
-  process.env.APP_DIR = next.appDir;
-  process.env.PM2_APP = next.pm2App;
-
-  const keys = ["HOST", "PORT", "CICD_TOKEN", "GITHUB_REPO", "APP_DIR", "PM2_APP", "DEPLOY_SCRIPT", "LOG_FILE"];
-  fs.writeFileSync(ENV_FILE, `${keys.map((key) => `${key}=${values[key] || process.env[key] || ""}`).join("\n")}\n`, { mode: 0o600 });
 }
 
 async function releases() {
@@ -212,6 +141,15 @@ function runDeploy(tag) {
     fs.appendFileSync(LOG_FILE, `== finished with code ${code} ==\n`);
     running = false;
   });
+}
+
+function stopDeploy(tag) {
+  fs.appendFileSync(LOG_FILE, `\n== ${new Date().toISOString()} stop ${tag} ==\n`);
+  const child = spawn("pm2", ["stop", versionAppName(tag)], { stdio: ["ignore", "pipe", "pipe"] });
+
+  child.stdout.on("data", (data) => fs.appendFileSync(LOG_FILE, data));
+  child.stderr.on("data", (data) => fs.appendFileSync(LOG_FILE, data));
+  child.on("close", (code) => fs.appendFileSync(LOG_FILE, `== stop finished with code ${code} ==\n`));
 }
 
 function loginPage(error = "") {
@@ -246,20 +184,26 @@ function loginPage(error = "") {
 async function dashboard(message = "", isError = false) {
   let rows = "";
   let releaseError = "";
+  const activeTags = runningVersionTags();
 
   try {
-    rows = (await releases()).map((release) => `
+    rows = (await releases()).map((release) => {
+      const isActive = activeTags.has(release.tag);
+      const docsPath = `/${release.tag}/`;
+      return `
       <tr>
         <td><a href="${escapeHtml(release.url)}" target="_blank" rel="noreferrer">${escapeHtml(release.tag)}</a></td>
         <td>${escapeHtml(release.name)}</td>
         <td>${escapeHtml(release.date)}</td>
+        <td><a href="${escapeHtml(DOCS_BASE_URL + docsPath)}" target="_blank" rel="noreferrer">${escapeHtml(docsPath)}</a></td>
         <td>
-          <form method="post" action="/run">
+          <form method="post" action="${isActive ? "/stop" : "/run"}">
             <input type="hidden" name="tag" value="${escapeHtml(release.tag)}">
-            <button ${running ? "disabled" : ""}>Run</button>
+            <button class="${isActive ? "stop" : ""}" ${running ? "disabled" : ""}>${isActive ? "Stop" : "Run"}</button>
           </form>
         </td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
   } catch (error) {
     releaseError = `Không tải được GitHub releases: ${error.message}`;
   }
@@ -280,6 +224,7 @@ async function dashboard(message = "", isError = false) {
     form.inline{display:flex;gap:8px;margin:0 0 18px}
     input{font:inherit;padding:10px 12px;border:1px solid #c9ced6;border-radius:6px;min-width:220px}
     button{font:inherit;padding:10px 14px;border:0;border-radius:6px;background:#1769e0;color:white;cursor:pointer}
+    button.stop{background:#d92d20}
     button:disabled{background:#98a2b3;cursor:not-allowed}
     table{width:100%;border-collapse:collapse;background:white;border:1px solid #e1e5ea}
     th,td{text-align:left;padding:12px;border-bottom:1px solid #e1e5ea;vertical-align:top}
@@ -288,14 +233,11 @@ async function dashboard(message = "", isError = false) {
     .err{background:#fff0f0;color:#9b1c1c}
     pre{white-space:pre-wrap;background:#101418;color:#d6e2ee;padding:14px;border-radius:6px;max-height:360px;overflow:auto}
     a{color:#1769e0}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 18px}
+    .grid{display:grid;grid-template-columns:220px;gap:10px;margin:0 0 18px}
     .cell{background:white;border:1px solid #e1e5ea;padding:10px;border-radius:6px}
     .label{font-size:12px;color:#667085;margin-bottom:4px}
     .value{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
     .ok{color:#067647;font-weight:700}.bad{color:#b42318;font-weight:700}
-    .config{display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin:0 0 18px}
-    .config input{width:100%;box-sizing:border-box}
-    @media (max-width: 900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.config{grid-template-columns:1fr}}
     @media (max-width: 680px){form.inline{display:block}input,button{width:100%;box-sizing:border-box;margin-bottom:8px}table{font-size:14px}.grid{grid-template-columns:1fr}}
   </style>
 </head>
@@ -310,8 +252,8 @@ async function dashboard(message = "", isError = false) {
       <button ${running ? "disabled" : ""}>Run</button>
     </form>
     <table>
-      <thead><tr><th>Tag</th><th>Release</th><th>Published</th><th></th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="4">Chưa có release để hiển thị.</td></tr>`}</tbody>
+      <thead><tr><th>Tag</th><th>Release</th><th>Published</th><th>Path</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="5">Chưa có release để hiển thị.</td></tr>`}</tbody>
     </table>
     <h2>Deploy log</h2>
     <pre>${escapeHtml(log)}</pre>
@@ -321,39 +263,11 @@ async function dashboard(message = "", isError = false) {
 }
 
 function statusPanel() {
-  const info = statusInfo();
-  const appRows = info.apps.map((app) => `
-    <tr>
-      <td>${escapeHtml(app.name)}</td>
-      <td class="${app.status === "online" ? "ok" : "bad"}">${escapeHtml(app.status)}</td>
-      <td>${escapeHtml(app.port || "-")}</td>
-      <td>${escapeHtml(app.cwd || "-")}</td>
-      <td>${escapeHtml(app.restarts)}</td>
-    </tr>`).join("");
-
   return `
     <h2>Status</h2>
     <div class="grid">
-      <div class="cell"><div class="label">CICD server</div><div class="value ok">${escapeHtml(info.cicd.status)}</div></div>
-      <div class="cell"><div class="label">CICD path</div><div class="value">${escapeHtml(info.cicd.path)}</div></div>
-      <div class="cell"><div class="label">Deploy script</div><div class="value">${escapeHtml(info.cicd.deployScript)}</div></div>
-      <div class="cell"><div class="label">Log file</div><div class="value">${escapeHtml(info.cicd.logFile)}</div></div>
-      <div class="cell"><div class="label">Deploy app</div><div class="value ${info.selectedApp?.status === "online" ? "ok" : "bad"}">${escapeHtml(info.cfg.pm2App)} ${escapeHtml(info.selectedApp?.status || "not found")}</div></div>
-      <div class="cell"><div class="label">Deploy path</div><div class="value ${info.target.exists && info.target.isRepo ? "ok" : "bad"}">${escapeHtml(info.target.path)}</div></div>
-      <div class="cell"><div class="label">Current tag</div><div class="value">${escapeHtml(info.target.tag || "-")}</div></div>
-      <div class="cell"><div class="label">Branch</div><div class="value">${escapeHtml(info.target.branch)}</div></div>
-      <div class="cell"><div class="label">Commit</div><div class="value">${escapeHtml(info.target.commit || "-")}</div></div>
-      <div class="cell"><div class="label">Git status</div><div class="value">${escapeHtml(info.target.status)}</div></div>
-    </div>
-    <form class="config" method="post" action="/config">
-      <input name="appDir" value="${escapeHtml(info.cfg.appDir)}" placeholder="/home/vtvlive/vlive-docs" required>
-      <input name="pm2App" value="${escapeHtml(info.cfg.pm2App)}" placeholder="vlive-docs" required>
-      <button>Save path</button>
-    </form>
-    <table>
-      <thead><tr><th>PM2 app</th><th>Status</th><th>Port</th><th>Path</th><th>Restarts</th></tr></thead>
-      <tbody>${appRows || `<tr><td colspan="5">Không đọc được PM2 app.</td></tr>`}</tbody>
-    </table>`;
+      <div class="cell"><div class="label">CICD server</div><div class="value ok">running</div></div>
+    </div>`;
 }
 
 http.createServer(async (req, res) => {
@@ -374,20 +288,6 @@ http.createServer(async (req, res) => {
 
     if (!authed(req)) return send(res, 401, loginPage());
 
-    if (req.url === "/config" && req.method === "POST") {
-      const params = new URLSearchParams(await readBody(req));
-      const appDir = String(params.get("appDir") || "").trim();
-      const pm2App = String(params.get("pm2App") || "").trim();
-      if (!appDir.startsWith("/") || !/^[A-Za-z0-9._/-]+$/.test(appDir)) {
-        return send(res, 400, await dashboard("APP_DIR không hợp lệ.", true));
-      }
-      if (!/^[A-Za-z0-9._-]{1,80}$/.test(pm2App)) {
-        return send(res, 400, await dashboard("PM2_APP không hợp lệ.", true));
-      }
-      saveConfig({ appDir, pm2App });
-      return send(res, 200, await dashboard("Đã lưu path deploy."));
-    }
-
     if (req.url === "/run" && req.method === "POST") {
       const params = new URLSearchParams(await readBody(req));
       const tag = normalizeTag(params.get("tag"));
@@ -395,6 +295,14 @@ http.createServer(async (req, res) => {
       if (running) return send(res, 409, await dashboard("Đang deploy, chờ lượt hiện tại xong.", true));
       runDeploy(tag);
       return send(res, 202, await dashboard(`Đã nhận lệnh deploy ${tag}.`));
+    }
+
+    if (req.url === "/stop" && req.method === "POST") {
+      const params = new URLSearchParams(await readBody(req));
+      const tag = normalizeTag(params.get("tag"));
+      if (!tag) return send(res, 400, await dashboard("Tag không hợp lệ.", true));
+      stopDeploy(tag);
+      return send(res, 202, await dashboard(`Đã nhận lệnh stop ${tag}.`));
     }
 
     return send(res, 200, await dashboard());
