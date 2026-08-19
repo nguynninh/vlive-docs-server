@@ -12,7 +12,7 @@ if [[ ! "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,80}$ ]]; then
   exit 2
 fi
 
-exec 9>/home/vtvlive/cicd/deploy.lock
+exec 9>/home/vtvlive/vlive-docs-server/deploy.lock
 flock -n 9 || { echo "Another deploy is running"; exit 3; }
 
 cd "$APP_DIR"

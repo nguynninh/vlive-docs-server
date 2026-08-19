@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/vtvlive/cicd
-EnvironmentFile=/home/vtvlive/cicd/.env
-ExecStart=/usr/bin/node /home/vtvlive/cicd/src/server.js
+WorkingDirectory=/home/vtvlive/vlive-docs-server
+EnvironmentFile=/home/vtvlive/vlive-docs-server/.env
+ExecStart=/usr/bin/node /home/vtvlive/vlive-docs-server/src/server.js
 Restart=always
 RestartSec=3
 User=root

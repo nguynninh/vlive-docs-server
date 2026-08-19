@@ -15,9 +15,9 @@ Mở `http://127.0.0.1:3001`, nhập `CICD_TOKEN` để login.
 ## Deploy lên server
 
 ```bash
-rsync -av --exclude .env --exclude .git ./ root@10.53.10.14:/home/vtvlive/cicd/
+rsync -av --exclude .env --exclude .git ./ root@10.53.10.14:/home/vtvlive/vlive-docs-server/
 ssh root@10.53.10.14
-cd /home/vtvlive/cicd
+cd /home/vtvlive/vlive-docs-server
 cp .env.example .env
 chmod 600 .env
 chmod +x scripts/deploy.sh
@@ -26,4 +26,4 @@ systemctl daemon-reload
 systemctl enable --now vlive-cicd
 ```
 
-Đổi `CICD_TOKEN` trong `/home/vtvlive/cicd/.env` trước khi mở public.
+Đổi `CICD_TOKEN` trong `/home/vtvlive/vlive-docs-server/.env` trước khi mở public.
